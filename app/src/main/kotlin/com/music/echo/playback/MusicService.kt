@@ -4032,6 +4032,10 @@ class MusicService : MediaLibraryService(), Player.Listener, PlaybackStatsListen
 
       val persistQueue =
         currentQueue
+          // Unwrap first: `toPersistQueue` matches the concrete queue type, so a
+          // CampaignInjectedQueue would fall through to its LIST branch and lose
+          // the radio continuation on restore.
+          .unwrapped
           .toPersistQueue(
             title = queueTitle,
             items = player.mediaItems.mapNotNull { it.metadata },
