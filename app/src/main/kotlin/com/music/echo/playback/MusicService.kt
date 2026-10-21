@@ -164,6 +164,9 @@ import echo.music.iad1tya.playback.queues.EmptyQueue
 import echo.music.iad1tya.playback.queues.ListQueue
 import echo.music.iad1tya.playback.queues.Queue
 import echo.music.iad1tya.playback.queues.YouTubeQueue
+import com.music.echo.playback.queues.CampaignInjectedQueue
+import com.music.echo.playback.queues.campaignIdOrNull
+import com.music.echo.playback.queues.unwrapped
 import echo.music.iad1tya.playback.queues.filterExplicit
 import echo.music.iad1tya.playback.queues.filterVideoSongs
 import echo.music.iad1tya.ui.screens.settings.DiscordPresenceManager
@@ -1714,7 +1717,14 @@ class MusicService : MediaLibraryService(), Player.Listener, PlaybackStatsListen
     queueGeneration++
     loadMoreJob?.cancel()
     loadMoreJob = null
-    currentQueue = queue
+    // Campaign injection is the last step, on top of whatever order the caller
+    // settled — every queue passes through here, so a promoted campaign rides
+    // along in a search, playlist, album, radio or autoplay queue alike. See
+    // [CampaignInjectedQueue]; a slot with no eligible campaign is simply
+    // skipped, so the base queue is unchanged when nothing is live.
+    val injectedQueue: Queue =
+      if (com.mavins.campaign.Campaigns.isInitialized) CampaignInjectedQueue(queue) else queue
+    currentQueue = injectedQueue
     queueTitle = null
     val persistShuffleAcrossQueues = dataStore.get(PersistentShuffleAcrossQueuesKey, false)
     val previousShuffleEnabled = player.shuffleModeEnabled
@@ -1734,7 +1744,7 @@ class MusicService : MediaLibraryService(), Player.Listener, PlaybackStatsListen
     return scope.launch(SilentHandler) {
       val initialStatus =
         withContext(Dispatchers.IO) {
-          queue
+          injectedQueue
             .getInitialStatus()
             .filterExplicit(dataStore.get(HideExplicitKey, false))
             .filterVideoSongs(
@@ -1742,14 +1752,14 @@ class MusicService : MediaLibraryService(), Player.Listener, PlaybackStatsListen
                 dataStore.get(echo.music.iad1tya.constants.DataSaverEnabledKey, false)
             )
         }
-      if (queue.preloadItem != null && player.playbackState == STATE_IDLE) return@launch
+      if (injectedQueue.preloadItem != null && player.playbackState == STATE_IDLE) return@launch
       if (initialStatus.title != null) {
         queueTitle = initialStatus.title
       }
       if (initialStatus.items.isEmpty()) return@launch
 
       originalQueueSize = initialStatus.items.size
-      if (queue.preloadItem != null) {
+      if (injectedQueue.preloadItem != null) {
         val safeIndex =
           initialStatus.mediaItemIndex.coerceIn(0, (initialStatus.items.size - 1).coerceAtLeast(0))
         player.addMediaItems(0, initialStatus.items.subList(0, safeIndex))
@@ -1821,11 +1831,16 @@ class MusicService : MediaLibraryService(), Player.Listener, PlaybackStatsListen
 
     scope.launch(SilentHandler) {
       val radioQueue = YouTubeQueue(endpoint = WatchEndpoint(videoId = currentMediaId))
+      // Same injection as playQueue: this path builds a queue directly and
+      // never calls playQueue, so without wrapping here a seamless radio
+      // continuation would be the one queue with no campaigns in it.
+      val injectedRadioQueue: Queue =
+        if (com.mavins.campaign.Campaigns.isInitialized) CampaignInjectedQueue(radioQueue) else radioQueue
 
       try {
         val initialStatus =
           withContext(Dispatchers.IO) {
-            radioQueue
+            injectedRadioQueue
               .getInitialStatus()
               .filterExplicit(dataStore.get(HideExplicitKey, false))
               .filterVideoSongs(
@@ -1861,7 +1876,7 @@ class MusicService : MediaLibraryService(), Player.Listener, PlaybackStatsListen
         queueGeneration++
         loadMoreJob?.cancel()
         loadMoreJob = null
-        currentQueue = radioQueue
+        currentQueue = injectedRadioQueue
       } catch (e: Exception) {
 
         try {
@@ -2135,6 +2150,10 @@ class MusicService : MediaLibraryService(), Player.Listener, PlaybackStatsListen
       items = List(player.mediaItemCount) { player.getMediaItemAt(it) },
       mediaItemIndex = player.currentMediaItemIndex.coerceAtLeast(0),
       positionMs = player.currentPosition.coerceAtLeast(0L),
+      // The decorator, not its base: restoreQueueSnapshot re-attaches this
+      // queue so its continuation keeps paging, and the decorator is what
+      // keeps campaign injection alive across the restore. Storing the bare
+      // base would drop injection for the rest of that queue's life.
       queue = currentQueue,
       title = queueTitle,
     )
@@ -2158,7 +2177,7 @@ class MusicService : MediaLibraryService(), Player.Listener, PlaybackStatsListen
   }
 
   fun setPauseAtEndOfItems(queue: Queue, pause: Boolean) {
-    if (!playerInitialized.value || currentQueue !== queue) return
+    if (!playerInitialized.value || currentQueue.unwrapped !== queue) return
     pauseAtEndOwner = if (pause) queue else null
     player.pauseAtEndOfMediaItems = pause
   }
@@ -2506,8 +2525,27 @@ class MusicService : MediaLibraryService(), Player.Listener, PlaybackStatsListen
       val completionRatio = if (durationMs > 0L) trackedAccumulatedPlayMs.toFloat() / durationMs else 0f
       val wasSkip = !wasAutoTransition && completionRatio < 0.85f
       val wasFlowBrowse =
-        currentQueue is MusicFlowQueue &&
+        currentQueue.unwrapped is MusicFlowQueue &&
           trackedAccumulatedPlayMs < MusicFlowQueue.BROWSE_SKIP_THRESHOLD_MS
+
+      // A campaign that just left the player is reported here: this is the one
+      // place that knows the item's accumulated play time and whether it was a
+      // real listen or a skip. The item carries the campaign id in its extras
+      // (see CampaignInjectedQueue), so no separate "which campaign is playing"
+      // state is needed — the tracker cannot drift from the player.
+      prevItem.campaignIdOrNull?.let { campaignId ->
+        val listenedMs = trackedAccumulatedPlayMs
+        val full = durationMs > 0L && listenedMs >= durationMs * 9 / 10
+        if (wasAutoTransition || completionRatio >= 0.85f) {
+          scope.launch(Dispatchers.IO) {
+            com.mavins.campaign.Campaigns.recordPlay(
+              campaignId = campaignId,
+              listenDurationSeconds = (listenedMs / 1000L).toInt(),
+              isFullListen = full,
+            )
+          }
+        }
+      }
 
       if (wasSkip && !wasFlowBrowse && trackedAccumulatedPlayMs > 0L) {
         val prevMeta = prevItem.metadata
@@ -2617,7 +2655,7 @@ class MusicService : MediaLibraryService(), Player.Listener, PlaybackStatsListen
               player.playbackState != STATE_IDLE &&
               mediaItems.isNotEmpty() &&
               queueGeneration == startGeneration &&
-              currentQueue === queueAtStart &&
+              currentQueue.unwrapped === queueAtStart.unwrapped &&
               currentQueue != EmptyQueue
           ) {
             player.addMediaItems(mediaItems)
@@ -4377,7 +4415,7 @@ class MusicService : MediaLibraryService(), Player.Listener, PlaybackStatsListen
     crossfadeTriggerJob?.cancel()
     crossfadeTriggerJob = null
     releasePrebuffered()
-    if (pauseAtEndOwner != null && pauseAtEndOwner === currentQueue) return
+    if (pauseAtEndOwner != null && pauseAtEndOwner === currentQueue.unwrapped) return
     if (
       !crossfadeEnabled || player.duration == C.TIME_UNSET || player.duration <= crossfadeDuration
     )
@@ -4918,7 +4956,7 @@ class MusicService : MediaLibraryService(), Player.Listener, PlaybackStatsListen
 
     fadingPlayer = currentPlayer
     player = nextPlayer
-    player.pauseAtEndOfMediaItems = pauseAtEndOwner != null && pauseAtEndOwner === currentQueue
+    player.pauseAtEndOfMediaItems = pauseAtEndOwner != null && pauseAtEndOwner === currentQueue.unwrapped
     _playerFlow.value = player
     secondaryPlayer = null
 

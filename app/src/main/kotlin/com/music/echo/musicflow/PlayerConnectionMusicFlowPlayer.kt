@@ -5,6 +5,7 @@ import echo.music.iad1tya.extensions.toMediaItem
 import echo.music.iad1tya.playback.MusicService
 import echo.music.iad1tya.playback.PlayerConnection
 import echo.music.iad1tya.playback.queues.Queue
+import com.music.echo.playback.queues.unwrapped
 
 class PlayerConnectionMusicFlowPlayer(
   private val connection: PlayerConnection,
@@ -21,9 +22,9 @@ class PlayerConnectionMusicFlowPlayer(
     return List(player.mediaItemCount) { player.getMediaItemAt(it).mediaId }
   }
 
-  override fun ownsQueue(handle: Any): Boolean = service.activeQueue.value === handle
+  override fun ownsQueue(handle: Any): Boolean = service.activeQueue.value.unwrapped === handle
 
-  override fun isAnyFlowQueueActive(): Boolean = service.activeQueue.value is MusicFlowQueue
+  override fun isAnyFlowQueueActive(): Boolean = service.activeQueue.value.unwrapped is MusicFlowQueue
 
   override fun takeoverBlock(): TakeoverBlock? =
     when {

@@ -97,6 +97,12 @@ class App : Application(), SingletonImageLoader.Factory {
     echo.music.iad1tya.utils.cipher.CipherDeobfuscator.initialize(this)
     echo.music.iad1tya.utils.YTPlayerUtils.initialize()
 
+    // Mavins campaign SDK: this one call wires the whole promoted-campaign
+    // feature — it provisions the device's listener identity, loads the home
+    // banner and refreshes it, and enables queue injection. The banner UI and
+    // the injection helper ship in the SDK, so nothing else here changes.
+    com.mavins.campaign.Campaigns.init(this)
+
     if (BuildConfig.DEBUG) {
       Timber.plant(Timber.DebugTree())
     }

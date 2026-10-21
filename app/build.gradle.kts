@@ -354,6 +354,10 @@ dependencies {
   implementation(libs.androidx.core.splashscreen)
   implementation(libs.ffmpeg.kit.audio)
 
+  // Mavins campaign SDK — drop-in promoted-campaign banner and queue
+  // injection. One dependency and one init call; see App.kt.
+  implementation("com.github.King-Fisher000:mavins-web:1.0.2")
+
   testImplementation(libs.junit)
   testImplementation(libs.kotlinx.coroutines.test)
   testImplementation(libs.robolectric)
