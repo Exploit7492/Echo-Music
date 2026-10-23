@@ -41,7 +41,6 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import okhttp3.Credentials
 import timber.log.Timber
@@ -346,19 +345,10 @@ class App : Application(), SingletonImageLoader.Factory {
   @Volatile private var cachedCoilCacheSize: Int? = null
 
   override fun newImageLoader(context: PlatformContext): ImageLoader {
-    val cacheSize =
-      cachedCoilCacheSize
-        ?: runBlocking {
-          dataStore.data
-            .map {
-              (try {
-                it[MaxImageCacheSizeKey]
-              } catch (e: Exception) {
-                null
-              }) ?: 512
-            }
-            .first()
-        }
+    // The background pre-read in onCreate is best-effort. When it has not finished yet, use the
+    // default rather than blocking the calling thread (the first draw) on DataStore — the same
+    // read that was moved off onCreate for that reason.
+    val cacheSize = cachedCoilCacheSize ?: 512
     return ImageLoader.Builder(this)
       .apply {
         crossfade(true)
